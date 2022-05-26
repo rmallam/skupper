@@ -54,6 +54,12 @@ rules:
   - create
   - delete
 - apiGroups:
+  - route.openshift.io
+  resources:
+  - routes/custom-host
+  verbs:
+  - create
+- apiGroups:
   - networking.k8s.io
   resources:
   - ingresses
