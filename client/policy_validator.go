@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"regexp"
 	"time"
 
@@ -60,6 +61,7 @@ type ClusterPolicyValidator struct {
 	dc                     *discovery.DiscoveryClient
 	skupperPolicy          v1alpha1.SkupperClusterPolicyInterface
 	disablePolicyDiscovery bool
+	staticPolicyList       []v1alpha12.SkupperClusterPolicy
 }
 
 func NewClusterPolicyValidator(cli *VanClient) *ClusterPolicyValidator {
@@ -86,7 +88,14 @@ func (p *ClusterPolicyValidator) getSkupperPolicy() (v1alpha1.SkupperClusterPoli
 	return p.skupperPolicy, nil
 }
 
+func (p *ClusterPolicyValidator) SetStaticPolicyList(policies []v1alpha12.SkupperClusterPolicy) {
+	p.staticPolicyList = policies
+}
+
 func (p *ClusterPolicyValidator) LoadNamespacePolicies() ([]v1alpha12.SkupperClusterPolicy, error) {
+	if p.staticPolicyList != nil {
+		return p.staticPolicyList, nil
+	}
 	policies := []v1alpha12.SkupperClusterPolicy{}
 	skupperPolicy, err := p.getSkupperPolicy()
 	if err != nil {
@@ -304,15 +313,14 @@ func (p *PolicyAPIClient) execGet(args ...string) (*PolicyAPIResult, error) {
 	}
 	ctx, cn := context.WithTimeout(context.Background(), time.Second*30)
 	defer cn()
+	notEnabledErr := fmt.Errorf("Skupper is not enabled in namespace '%s'", p.cli.Namespace)
 	err := utils.RetryWithContext(ctx, time.Millisecond*100, func() (bool, error) {
 		_, err := p.cli.exec([]string{"get", "policies", "-h"}, p.cli.GetNamespace())
 		if err != nil {
-			if err.Error() == "Not ready" {
-				return false, nil
-			} else if err.Error() == "Not found" {
-				return false, fmt.Errorf("Skupper is not enabled in namespace '%s'", p.cli.Namespace)
+			if _, err := getRootObject(p.cli); err != nil && errors.IsNotFound(err) {
+				return true, notEnabledErr
 			}
-			return true, err
+			return false, nil
 		}
 		return true, nil
 	})
@@ -324,7 +332,11 @@ func (p *PolicyAPIClient) execGet(args ...string) (*PolicyAPIResult, error) {
 				Enabled: false,
 			}, nil
 		}
-		err := fmt.Errorf("Unable to communicate with the API: %v", err)
+		if os.IsTimeout(err) {
+			err = notEnabledErr
+		} else if err != notEnabledErr {
+			err = fmt.Errorf("Unable to communicate with the API: %v", err)
+		}
 		if event.DefaultStore != nil {
 			event.Recordf("PolicyAPIError", err.Error())
 		}

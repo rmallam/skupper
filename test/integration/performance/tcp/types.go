@@ -1,17 +1,23 @@
 package tcp
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/pkg/kube"
+	"github.com/skupperproject/skupper/pkg/utils"
 	"github.com/skupperproject/skupper/test/utils/base"
 	"github.com/skupperproject/skupper/test/utils/constants"
 	"github.com/skupperproject/skupper/test/utils/k8s"
@@ -91,6 +97,7 @@ func (s *IperfScenario) tearDown() {
 	for _, ctx := range s.teardownClusters {
 		_ = ctx.DeleteNamespace()
 	}
+	s.teardownClusters = []*base.ClusterContext{}
 }
 
 // String returns a JSON representation of the test scenario
@@ -101,7 +108,7 @@ func (s *IperfScenario) String() string {
 
 // initializeClusters creates the namespaces, initializes Skupper,
 // if using a skupper site, and get sites connected.
-func (s *IperfScenario) initializeClusters(t *testing.T) {
+func (s *IperfScenario) initializeClusters(t *testing.T, debugMode bool) {
 	needs := base.ClusterNeeds{
 		NamespaceId:    "iperf",
 		PublicClusters: s.clustersNeeded(),
@@ -112,6 +119,19 @@ func (s *IperfScenario) initializeClusters(t *testing.T) {
 	}
 	_, err := s.testRunner.Build(needs, nil)
 	assert.Assert(t, err)
+
+	routerOptions := types.RouterOptions{
+		Tuning: types.Tuning{
+			Cpu:    s.SkupperSettings.Cpu,
+			Memory: s.SkupperSettings.Memory,
+		},
+		MaxFrameSize:     s.SkupperSettings.MaxFrameSize,
+		MaxSessionFrames: s.SkupperSettings.MaxSessionFrames,
+	}
+	if debugMode {
+		t.Logf("setting router debug options")
+		routerOptions = constants.DefaultRouterOptions(&routerOptions)
+	}
 
 	if s.SkupperSites > 0 {
 		var connectionToken string
@@ -131,14 +151,7 @@ func (s *IperfScenario) initializeClusters(t *testing.T) {
 				User:              "admin",
 				Password:          "admin",
 				Ingress:           ctx.VanClient.GetIngressDefault(),
-				Router: types.RouterOptions{
-					Tuning: types.Tuning{
-						Cpu:    s.SkupperSettings.Cpu,
-						Memory: s.SkupperSettings.Memory,
-					},
-					MaxFrameSize:     s.SkupperSettings.MaxFrameSize,
-					MaxSessionFrames: s.SkupperSettings.MaxSessionFrames,
-				},
+				Router:            routerOptions,
 				Controller: types.ControllerOptions{
 					Tuning: types.Tuning{
 						Cpu:    s.SkupperSettings.Cpu,
@@ -190,6 +203,90 @@ func (s *IperfScenario) initializeClusters(t *testing.T) {
 		assert.Assert(t, ctx.CreateNamespace())
 		s.teardownClusters = append(s.teardownClusters, ctx)
 	}
+}
+
+func (s *IperfScenario) tailRouterLogs(t *testing.T, ctx context.Context, saveLogs *bool) *sync.WaitGroup {
+	wg := &sync.WaitGroup{}
+	basedir := fmt.Sprintf("tmp/%s", s.getTestName())
+	err := os.MkdirAll(basedir, 0755)
+	if err != nil {
+		t.Logf("Unable to save router logs. Cannot create directory %s: %v", basedir, err)
+		return wg
+	}
+	tailRouterLogs := func(cluster *base.ClusterContext) {
+		defer wg.Done()
+		cli := cluster.VanClient
+		fileName := fmt.Sprintf("%s/%s-skupper-router.log", basedir, cli.Namespace)
+		tgzFileName := fmt.Sprintf("%s.tar.gz", fileName)
+		var pod *v1.Pod
+		var err error
+		t.Logf("Waiting for router pod to be running")
+		err = utils.RetryWithContext(ctx, time.Second*5, func() (bool, error) {
+			pod, err = kube.GetReadyPod(cli.Namespace, cli.KubeClient, "router")
+			if pod != nil && err == nil {
+				return true, nil
+			}
+			return false, nil
+		})
+		if err != nil {
+			t.Logf("Error waiting for skupper-router pod to be running: %v", err)
+			return
+		}
+		t.Logf("Buffering router logs for namespace '%s'", cli.Namespace)
+		req := cli.KubeClient.CoreV1().Pods(cli.Namespace).GetLogs(pod.Name, &v1.PodLogOptions{
+			Follow:    true,
+			Container: "router",
+		})
+		logsStream, err := req.Stream()
+		if err != nil {
+			t.Logf("Error getting router logs on namespace '%s': %v", cli.Namespace, err)
+			return
+		}
+		buf := &bytes.Buffer{}
+		wr, err := io.Copy(buf, logsStream)
+		if err != nil {
+			t.Logf("Error streaming router logs on namespace '%s': %v", cli.Namespace, err)
+			return
+		}
+		if *saveLogs {
+			t.Logf("Router logs buffer has been collected for namespace '%s': %d bytes", cli.Namespace, wr)
+			tgz, err := os.Create(tgzFileName)
+			if err != nil {
+				t.Logf("Error creating tarball '%s': %v", tgzFileName, err)
+				return
+			}
+			gz := gzip.NewWriter(tgz)
+			defer gz.Close()
+			tw := tar.NewWriter(gz)
+			defer tw.Close()
+
+			hdr := &tar.Header{
+				Name: fileName,
+				Mode: 0644,
+				Size: wr,
+			}
+			err = tw.WriteHeader(hdr)
+			if err != nil {
+				t.Logf("Failed to write tar file header for '%s': %v", tgzFileName, err)
+				return
+			}
+			_, err = tw.Write(buf.Bytes())
+			if err != nil {
+				t.Logf("Failed to write to tar archive '%s': %v", tgzFileName, err)
+				return
+			}
+			tgzPath, _ := filepath.Abs(tgzFileName)
+			t.Logf("Tarball has been saved: %s", tgzPath)
+		}
+	}
+	if s.SkupperSites == 0 {
+		return wg
+	}
+	for _, cluster := range s.testRunner.ClusterContexts {
+		wg.Add(1)
+		go tailRouterLogs(cluster)
+	}
+	return wg
 }
 
 // deployIperf3Server Deploys the iPerf3 server and wait for it to be running
@@ -315,6 +412,9 @@ func (s *IperfScenario) runIperf3Client(t *testing.T) {
 	assert.Assert(t, err)
 	// Waiting for the job to complete successfully
 	_, jobErr := k8s.WaitForJob(clientCluster.Namespace, clientCluster.VanClient.KubeClient, clientJob.Name, s.IperfSettings.JobTimeout)
+	if jobErr != nil {
+		s.testRunner.DumpTestInfo(s.getTestName())
+	}
 	// Saving job logs
 	logs, err := k8s.GetJobLogs(clientCluster.Namespace, clientCluster.VanClient.KubeClient, clientJob.Name)
 	assert.Assert(t, err)

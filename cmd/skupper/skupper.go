@@ -279,7 +279,7 @@ func NewClientHandleError(namespace string, context string, kubeConfigPath strin
 	if err != nil {
 		if exitOnError {
 			if strings.Contains(err.Error(), "invalid configuration: no configuration has been provided") {
-				fmt.Printf("%s. Please point to an existing, complete config file.\n", err.Error())
+				fmt.Printf("%s. Please point to an existing, valid kubeconfig file.\n", err.Error())
 			} else {
 				fmt.Println(err.Error())
 			}
@@ -392,8 +392,8 @@ installation that can then be connected to other skupper installations`,
 				routerCreateOpts.Router.Logging = logConfig
 			}
 			if routerCreateOpts.Router.DebugMode != "" {
-				if routerCreateOpts.Router.DebugMode != "valgrind" && routerCreateOpts.Router.DebugMode != "gdb" {
-					return fmt.Errorf("Bad value for --router-debug-mode: %s (use 'valgrind' or 'gdb')", routerCreateOpts.Router.DebugMode)
+				if routerCreateOpts.Router.DebugMode != "asan" && routerCreateOpts.Router.DebugMode != "gdb" {
+					return fmt.Errorf("Bad value for --router-debug-mode: %s (use 'asan' or 'gdb')", routerCreateOpts.Router.DebugMode)
 				}
 			}
 
@@ -441,7 +441,7 @@ installation that can then be connected to other skupper installations`,
 	cmd.Flags().BoolVarP(&routerCreateOpts.EnableServiceSync, "enable-service-sync", "", true, "Participate in cross-site service synchronization")
 	cmd.Flags().BoolVarP(&routerCreateOpts.EnableRouterConsole, "enable-router-console", "", false, "Enable router console")
 	cmd.Flags().StringVarP(&routerLogging, "router-logging", "", "", "Logging settings for router. 'trace', 'debug', 'info' (default), 'notice', 'warning', and 'error' are valid values.")
-	cmd.Flags().StringVarP(&routerCreateOpts.Router.DebugMode, "router-debug-mode", "", "", "Enable debug mode for router ('valgrind' or 'gdb' are valid values)")
+	cmd.Flags().StringVarP(&routerCreateOpts.Router.DebugMode, "router-debug-mode", "", "", "Enable debug mode for router ('asan' or 'gdb' are valid values)")
 
 	cmd.Flags().IntVar(&routerCreateOpts.Routers, "routers", 0, "Number of router replicas to start")
 	cmd.Flags().StringVar(&routerCreateOpts.Router.Cpu, "router-cpu", "", "CPU request for router pods")
@@ -753,7 +753,7 @@ func NewCmdExpose(newClient cobraFunc) *cobra.Command {
 	cmd.Flags().StringVar(&exposeOpts.ProxyTuning.NodeSelector, "proxy-node-selector", "", "Node selector to control placement of router pods")
 	cmd.Flags().StringVar(&exposeOpts.ProxyTuning.Affinity, "proxy-pod-affinity", "", "Pod affinity label matches to control placement of router pods")
 	cmd.Flags().StringVar(&exposeOpts.ProxyTuning.AntiAffinity, "proxy-pod-antiaffinity", "", "Pod antiaffinity label matches to control placement of router pods")
-	cmd.Flags().BoolVar(&exposeOpts.EnableTls, "enable-tls", false, "If specified, the service will be exposed over TLS")
+	cmd.Flags().BoolVar(&exposeOpts.EnableTls, "enable-tls", false, "If specified, the service will be exposed over TLS (valid only for http2 protocol)")
 
 	return cmd
 }
